@@ -1,0 +1,9 @@
+[package]
+name = "dblefr"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gif = "0.13.3"
+image = "0.25.8"
+rayon = "1.11.0"
