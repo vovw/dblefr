@@ -1,12 +1,15 @@
-use gif::{Encoder as GifEncoder, Frame as GifFrame, Repeat};
+use eframe::egui;
+use egui::{ColorImage, TextureHandle};
 use image::{Rgb, RgbImage};
 use rayon::prelude::*;
 use std::f64::consts::PI;
-use std::fs::File;
+use std::thread;
+use std::time::Instant;
+use crossbeam_channel::{bounded, Receiver, Sender};
 
 const G: f64 = 9.81; // Gravitational acceleration (m/s²)
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct PendulumParams {
     m1: f64, // Mass of first pendulum (kg)
     m2: f64, // Mass of second pendulum (kg)
@@ -14,24 +17,40 @@ struct PendulumParams {
     l2: f64, // Length of second pendulum (m)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct SimulationConfig {
     dt: f64,      // Time step for numerical integration (s)
     steps: usize, // Number of RK4 integration steps per pixel
 }
 
-// Default simulation parameters
-const PENDULUM: PendulumParams = PendulumParams {
-    m1: 1.0,
-    m2: 1.0,
-    l1: 1.0,
-    l2: 1.0,
-};
+#[derive(Clone, Copy, PartialEq)]
+struct RenderConfig {
+    width: u32,
+    height: u32,
+    preview_quality: bool, // If true, use lower quality for real-time preview
+}
 
-const SIMULATION: SimulationConfig = SimulationConfig {
-    dt: 0.01,
-    steps: 800,
-};
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum ColorScheme {
+    RedPurple,
+    BlueGreen,
+    Rainbow,
+    Fire,
+    Ocean,
+    Sunset,
+    Custom,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct ColorConfig {
+    scheme: ColorScheme,
+    brightness: f64,
+    contrast: f64,
+    saturation: f64,
+    custom_r: f64,
+    custom_g: f64,
+    custom_b: f64,
+}
 
 /// State of the double pendulum system
 #[derive(Clone, Copy)]
@@ -153,20 +172,104 @@ fn simulate_pendulum(
 }
 
 /// Creates color based on the final pendulum state
-fn state_to_color(final_state: State) -> Rgb<u8> {
+fn state_to_color(final_state: State, color_config: ColorConfig) -> Rgb<u8> {
     let sin_theta2 = final_state.theta2.sin();
+    let cos_theta2 = final_state.theta2.cos();
+    let _sin_theta1 = final_state.theta1.sin();
+    
+    // Base intensity from pendulum state
     let intensity = ((sin_theta2 + 1.0) * 0.5).clamp(0.0, 1.0);
+    let phase = ((cos_theta2 + 1.0) * 0.5).clamp(0.0, 1.0);
+    let combined = (intensity + phase * 0.3).clamp(0.0, 1.0);
+    
+    // Apply contrast and brightness
+    let adjusted = (combined * color_config.contrast + color_config.brightness).clamp(0.0, 1.0);
+    
+    let (r, g, b) = match color_config.scheme {
+        ColorScheme::RedPurple => {
+            let red = (adjusted * 0.8 + 0.2) * 255.0;
+            let green = (1.0 - adjusted) * 0.3 * 255.0;
+            let blue = (0.3 + adjusted * 0.4) * 255.0;
+            (red, green, blue)
+        },
+        ColorScheme::BlueGreen => {
+            let blue = (adjusted * 0.8 + 0.2) * 255.0;
+            let green = (0.5 + adjusted * 0.5) * 255.0;
+            let red = (1.0 - adjusted) * 0.2 * 255.0;
+            (red, green, blue)
+        },
+        ColorScheme::Rainbow => {
+            let hue = adjusted * 6.0; // 0-6 for full rainbow
+            let (r, g, b) = hsv_to_rgb(hue, 0.8, 0.9);
+            (r * 255.0, g * 255.0, b * 255.0)
+        },
+        ColorScheme::Fire => {
+            let red = (adjusted * 0.9 + 0.1) * 255.0;
+            let green = (adjusted * adjusted * 0.6) * 255.0;
+            let blue = (adjusted * adjusted * adjusted * 0.2) * 255.0;
+            (red, green, blue)
+        },
+        ColorScheme::Ocean => {
+            let blue = (adjusted * 0.7 + 0.3) * 255.0;
+            let green = (0.4 + adjusted * 0.4) * 255.0;
+            let red = (0.1 + adjusted * 0.2) * 255.0;
+            (red, green, blue)
+        },
+        ColorScheme::Sunset => {
+            let red = (adjusted * 0.8 + 0.2) * 255.0;
+            let green = (adjusted * 0.4 + 0.1) * 255.0;
+            let blue = (adjusted * adjusted * 0.3) * 255.0;
+            (red, green, blue)
+        },
+        ColorScheme::Custom => {
+            let red = (adjusted * color_config.custom_r) * 255.0;
+            let green = (adjusted * color_config.custom_g) * 255.0;
+            let blue = (adjusted * color_config.custom_b) * 255.0;
+            (red, green, blue)
+        },
+    };
+    
+    // Apply saturation
+    let gray = (r + g + b) / 3.0;
+    let final_r = (r + (gray - r) * (1.0 - color_config.saturation)).clamp(0.0, 255.0);
+    let final_g = (g + (gray - g) * (1.0 - color_config.saturation)).clamp(0.0, 255.0);
+    let final_b = (b + (gray - b) * (1.0 - color_config.saturation)).clamp(0.0, 255.0);
 
-    // Elegant red-purple gradient
-    let red = ((intensity * 0.8 + 0.2) * 255.0) as u8;
-    let green = ((1.0 - intensity) * 0.3 * 255.0) as u8;
-    let blue = ((0.3 + intensity * 0.4) * 255.0) as u8;
+    Rgb([final_r as u8, final_g as u8, final_b as u8])
+}
 
-    Rgb([red.max(50), green.max(20), blue.max(10)])
+/// Convert HSV to RGB
+fn hsv_to_rgb(h: f64, s: f64, v: f64) -> (f64, f64, f64) {
+    let c = v * s;
+    let x = c * (1.0 - ((h % 2.0) - 1.0).abs());
+    let m = v - c;
+    
+    let (r, g, b) = if h < 1.0 {
+        (c, x, 0.0)
+    } else if h < 2.0 {
+        (x, c, 0.0)
+    } else if h < 3.0 {
+        (0.0, c, x)
+    } else if h < 4.0 {
+        (0.0, x, c)
+    } else if h < 5.0 {
+        (x, 0.0, c)
+    } else {
+        (c, 0.0, x)
+    };
+    
+    (r + m, g + m, b + m)
 }
 
 /// Renders a single frame of the fractal
-fn render_frame(width: u32, height: u32, phase_offset: f64) -> RgbImage {
+fn render_frame(
+    width: u32, 
+    height: u32, 
+    phase_offset: f64,
+    pendulum: PendulumParams,
+    sim_config: SimulationConfig,
+    color_config: ColorConfig,
+) -> RgbImage {
     let mut img = RgbImage::new(width, height);
     let two_pi = 2.0 * PI;
 
@@ -183,8 +286,8 @@ fn render_frame(width: u32, height: u32, phase_offset: f64) -> RgbImage {
 
                 // Create initial state and simulate
                 let initial_state = State::new(theta1, theta2);
-                let final_state = simulate_pendulum(initial_state, SIMULATION, PENDULUM);
-                let color = state_to_color(final_state);
+                let final_state = simulate_pendulum(initial_state, sim_config, pendulum);
+                let color = state_to_color(final_state, color_config);
 
                 row_pixels.push((x, y, color));
             }
@@ -202,65 +305,321 @@ fn render_frame(width: u32, height: u32, phase_offset: f64) -> RgbImage {
     img
 }
 
-/// Animation configuration
-struct AnimationConfig {
+/// Main application state
+struct DoublePendulumApp {
+    // Parameters
+    pendulum: PendulumParams,
+    sim_config: SimulationConfig,
+    render_config: RenderConfig,
+    color_config: ColorConfig,
+    phase_offset: f64,
+    
+    // UI state
+    texture: Option<TextureHandle>,
+    is_rendering: bool,
+    last_render_time: Option<Instant>,
+    render_requested: bool,
+    
+    // Real-time controls
+    auto_render: bool,
+    animation_enabled: bool,
+    animation_speed: f64,
+    last_params: Option<(PendulumParams, SimulationConfig, RenderConfig, ColorConfig, f64)>,
+    
+    // Threading
+    render_sender: Sender<RenderRequest>,
+    render_receiver: Receiver<RenderResult>,
+}
+
+#[derive(Clone)]
+struct RenderRequest {
     width: u32,
     height: u32,
-    frames: u32,
-    fps: u16,
+    phase_offset: f64,
+    pendulum: PendulumParams,
+    sim_config: SimulationConfig,
+    color_config: ColorConfig,
 }
 
-impl Default for AnimationConfig {
+#[derive(Clone)]
+struct RenderResult {
+    image: RgbImage,
+    render_time: f64,
+}
+
+impl Default for DoublePendulumApp {
     fn default() -> Self {
+        let (render_sender, _) = bounded::<RenderRequest>(1);
+        let (_, render_receiver) = bounded::<RenderResult>(1);
+        
         Self {
-            width: 320,
-            height: 320,
-            frames: 60,
-            fps: 20,
+            pendulum: PendulumParams {
+                m1: 1.0,
+                m2: 1.0,
+                l1: 1.0,
+                l2: 1.0,
+            },
+            sim_config: SimulationConfig {
+                dt: 0.01,
+                steps: 800,
+            },
+            render_config: RenderConfig {
+                width: 400,
+                height: 400,
+                preview_quality: true,
+            },
+            color_config: ColorConfig {
+                scheme: ColorScheme::RedPurple,
+                brightness: 0.0,
+                contrast: 1.0,
+                saturation: 1.0,
+                custom_r: 1.0,
+                custom_g: 0.3,
+                custom_b: 0.7,
+            },
+            phase_offset: 0.0,
+            texture: None,
+            is_rendering: false,
+            last_render_time: None,
+            render_requested: false,
+            auto_render: true,
+            animation_enabled: false,
+            animation_speed: 0.1,
+            last_params: None,
+            render_sender,
+            render_receiver,
         }
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = AnimationConfig::default();
-    let phase_step = 2.0 * PI / config.frames as f64;
-    let frame_delay = 100u16 / config.fps;
-
-    // Set up GIF encoder
-    let mut file = File::create("double_pendulum_anim.gif")?;
-    let mut encoder = GifEncoder::new(&mut file, config.width as u16, config.height as u16, &[])?;
-    encoder.set_repeat(Repeat::Infinite)?;
-
-    println!(
-        "Generating {} frames at {}x{} resolution...",
-        config.frames, config.width, config.height
-    );
-
-    // Generate animation frames
-    for frame_num in 0..config.frames {
-        let phase = frame_num as f64 * phase_step;
-        eprintln!("Rendering frame {}/{}", frame_num + 1, config.frames);
-
-        let frame_img = render_frame(config.width, config.height, phase);
-
-        // Convert to RGBA for GIF
-        let mut rgba_buffer = Vec::with_capacity((config.width * config.height * 4) as usize);
-        for pixel in frame_img.pixels() {
-            rgba_buffer.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
+impl eframe::App for DoublePendulumApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Update animation
+        if self.animation_enabled {
+            self.phase_offset += self.animation_speed * 0.016; // ~60fps
+            if self.phase_offset > 2.0 * PI {
+                self.phase_offset -= 2.0 * PI;
+            }
         }
 
-        let mut gif_frame = GifFrame::from_rgba_speed(
-            config.width as u16,
-            config.height as u16,
-            &mut rgba_buffer,
-            10,
-        );
-        gif_frame.delay = frame_delay;
-        encoder.write_frame(&gif_frame)?;
+        // Check for completed renders
+        if let Ok(result) = self.render_receiver.try_recv() {
+            self.is_rendering = false;
+            self.last_render_time = Some(Instant::now());
+            
+            // Convert to egui texture
+            let size = [result.image.width() as usize, result.image.height() as usize];
+            let pixels: Vec<egui::Color32> = result.image
+                .pixels()
+                .map(|p| egui::Color32::from_rgb(p[0], p[1], p[2]))
+                .collect();
+            
+            let color_image = ColorImage::from_rgba_unmultiplied(size, 
+                &pixels.iter().flat_map(|c| [c.r(), c.g(), c.b(), c.a()]).collect::<Vec<u8>>());
+            self.texture = Some(ctx.load_texture("pendulum_fractal", color_image, Default::default()));
+        }
+
+        // Check if parameters changed for auto-render
+        let current_params = (self.pendulum, self.sim_config, self.render_config, self.color_config, self.phase_offset);
+        let params_changed = self.last_params.map_or(true, |last| last != current_params);
+        
+        if params_changed {
+            self.last_params = Some(current_params);
+            if self.auto_render {
+                self.render_requested = true;
+            }
+        }
+
+        // Request render if needed
+        if self.render_requested && !self.is_rendering {
+            let steps = if self.render_config.preview_quality { 100 } else { 800 };
+            let sim_config = SimulationConfig {
+                dt: self.sim_config.dt,
+                steps,
+            };
+            
+            let request = RenderRequest {
+                width: self.render_config.width,
+                height: self.render_config.height,
+                phase_offset: self.phase_offset,
+                pendulum: self.pendulum,
+                sim_config,
+                color_config: self.color_config,
+            };
+            
+            if self.render_sender.try_send(request).is_ok() {
+                self.is_rendering = true;
+                self.render_requested = false;
+            }
+        }
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.heading("Double Pendulum Fractal Generator");
+            
+            ui.horizontal(|ui| {
+                // Left panel - Controls
+                ui.vertical(|ui| {
+                    ui.group(|ui| {
+                        ui.heading("Pendulum Parameters");
+                        
+                        ui.add(egui::Slider::new(&mut self.pendulum.m1, 0.1..=5.0).text("Mass 1 (kg)"));
+                        ui.add(egui::Slider::new(&mut self.pendulum.m2, 0.1..=5.0).text("Mass 2 (kg)"));
+                        ui.add(egui::Slider::new(&mut self.pendulum.l1, 0.1..=3.0).text("Length 1 (m)"));
+                        ui.add(egui::Slider::new(&mut self.pendulum.l2, 0.1..=3.0).text("Length 2 (m)"));
+                    });
+                    
+                    ui.add_space(10.0);
+                    
+                    ui.group(|ui| {
+                        ui.heading("Simulation Settings");
+                        
+                        ui.add(egui::Slider::new(&mut self.sim_config.dt, 0.001..=0.1).text("Time Step"));
+                        ui.add(egui::Slider::new(&mut self.phase_offset, 0.0..=2.0 * PI).text("Phase Offset"));
+                        
+                        ui.checkbox(&mut self.render_config.preview_quality, "Preview Quality (faster)");
+                    });
+                    
+                    ui.add_space(10.0);
+                    
+                    ui.group(|ui| {
+                        ui.heading("Color Settings");
+                        
+                        // Color scheme selection
+                        ui.horizontal(|ui| {
+                            ui.label("Scheme:");
+                            egui::ComboBox::from_id_source("color_scheme")
+                                .selected_text(format!("{:?}", self.color_config.scheme))
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut self.color_config.scheme, ColorScheme::RedPurple, "Red Purple");
+                                    ui.selectable_value(&mut self.color_config.scheme, ColorScheme::BlueGreen, "Blue Green");
+                                    ui.selectable_value(&mut self.color_config.scheme, ColorScheme::Rainbow, "Rainbow");
+                                    ui.selectable_value(&mut self.color_config.scheme, ColorScheme::Fire, "Fire");
+                                    ui.selectable_value(&mut self.color_config.scheme, ColorScheme::Ocean, "Ocean");
+                                    ui.selectable_value(&mut self.color_config.scheme, ColorScheme::Sunset, "Sunset");
+                                    ui.selectable_value(&mut self.color_config.scheme, ColorScheme::Custom, "Custom");
+                                });
+                        });
+                        
+                        // Color adjustments
+                        ui.add(egui::Slider::new(&mut self.color_config.brightness, -1.0..=1.0).text("Brightness"));
+                        ui.add(egui::Slider::new(&mut self.color_config.contrast, 0.1..=3.0).text("Contrast"));
+                        ui.add(egui::Slider::new(&mut self.color_config.saturation, 0.0..=2.0).text("Saturation"));
+                        
+                        // Custom color controls
+                        if self.color_config.scheme == ColorScheme::Custom {
+                            ui.add_space(5.0);
+                            ui.label("Custom Colors:");
+                            ui.add(egui::Slider::new(&mut self.color_config.custom_r, 0.0..=1.0).text("Red"));
+                            ui.add(egui::Slider::new(&mut self.color_config.custom_g, 0.0..=1.0).text("Green"));
+                            ui.add(egui::Slider::new(&mut self.color_config.custom_b, 0.0..=1.0).text("Blue"));
+                        }
+                    });
+                    
+                    ui.add_space(10.0);
+                    
+                    ui.group(|ui| {
+                        ui.heading("Render Settings");
+                        
+                        ui.add(egui::Slider::new(&mut self.render_config.width, 100..=800).text("Width"));
+                        ui.add(egui::Slider::new(&mut self.render_config.height, 100..=800).text("Height"));
+                        
+                        ui.add_space(5.0);
+                        ui.checkbox(&mut self.auto_render, "Auto Render (Real-time)");
+                        ui.checkbox(&mut self.animation_enabled, "Animation");
+                        
+                        if self.animation_enabled {
+                            ui.add(egui::Slider::new(&mut self.animation_speed, 0.01..=1.0).text("Animation Speed"));
+                        }
+                        
+                        ui.add_space(5.0);
+                        if ui.button("Render Now").clicked() {
+                            self.render_requested = true;
+                        }
+                    });
+                    
+                    ui.add_space(10.0);
+                    
+                    if let Some(last_time) = self.last_render_time {
+                        ui.label(format!("Last render: {:.2}s ago", last_time.elapsed().as_secs_f64()));
+                    }
+                    
+                    if self.is_rendering {
+                        ui.label("Rendering...");
+                        ui.spinner();
+                    } else if self.auto_render {
+                        ui.label("🔄 Real-time mode active");
+                    }
+                    
+                    if self.animation_enabled {
+                        ui.label(format!("🎬 Animating (speed: {:.2})", self.animation_speed));
+                    }
+                });
+                
+                ui.add_space(20.0);
+                
+                // Right panel - Image display
+                ui.vertical(|ui| {
+                    ui.heading("Fractal Preview");
+                    
+                    if let Some(texture) = &self.texture {
+                        let max_size = ui.available_size().min(egui::Vec2::splat(400.0));
+                        ui.add(egui::Image::new(texture).max_size(max_size));
+                    } else {
+                        ui.label("No image rendered yet. Adjust parameters and click 'Render Now'.");
+                    }
+                });
+            });
+        });
+        
+        // Request continuous updates for real-time rendering
+        if self.auto_render || self.animation_enabled {
+            ctx.request_repaint();
+        }
     }
+}
 
-    println!("\n✨ Successfully created double_pendulum_anim.gif");
-    println!("This fractal reveals the chaotic beauty of double pendulum dynamics!");
+fn main() -> Result<(), eframe::Error> {
+    // Start render thread
+    let (render_sender, render_receiver) = bounded::<RenderRequest>(1);
+    let (result_sender, result_receiver) = bounded::<RenderResult>(1);
+    
+    thread::spawn(move || {
+        while let Ok(request) = render_receiver.recv() {
+            let start_time = Instant::now();
+            
+            let image = render_frame(
+                request.width,
+                request.height,
+                request.phase_offset,
+                request.pendulum,
+                request.sim_config,
+                request.color_config,
+            );
+            
+            let render_time = start_time.elapsed().as_secs_f64();
+            
+            let result = RenderResult {
+                image,
+                render_time,
+            };
+            
+            let _ = result_sender.send(result);
+        }
+    });
 
-    Ok(())
+    let mut app = DoublePendulumApp::default();
+    app.render_sender = render_sender;
+    app.render_receiver = result_receiver;
+
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1000.0, 700.0]),
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        "Double Pendulum Fractal Generator",
+        options,
+        Box::new(|_cc| Ok(Box::new(app))),
+    )
 }
