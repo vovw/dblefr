@@ -318,6 +318,7 @@ struct DoublePendulumApp {
     texture: Option<TextureHandle>,
     is_rendering: bool,
     last_render_time: Option<Instant>,
+    last_render_duration: Option<f64>,
     render_requested: bool,
     
     // Real-time controls
@@ -381,6 +382,7 @@ impl Default for DoublePendulumApp {
             texture: None,
             is_rendering: false,
             last_render_time: None,
+            last_render_duration: None,
             render_requested: false,
             auto_render: true,
             animation_enabled: false,
@@ -406,6 +408,7 @@ impl eframe::App for DoublePendulumApp {
         if let Ok(result) = self.render_receiver.try_recv() {
             self.is_rendering = false;
             self.last_render_time = Some(Instant::now());
+            self.last_render_duration = Some(result.render_time);
             
             // Convert to egui texture
             let size = [result.image.width() as usize, result.image.height() as usize];
@@ -541,6 +544,10 @@ impl eframe::App for DoublePendulumApp {
                     
                     if let Some(last_time) = self.last_render_time {
                         ui.label(format!("Last render: {:.2}s ago", last_time.elapsed().as_secs_f64()));
+                    }
+
+                    if let Some(duration) = self.last_render_duration {
+                        ui.label(format!("Render time: {:.2}s", duration));
                     }
                     
                     if self.is_rendering {
